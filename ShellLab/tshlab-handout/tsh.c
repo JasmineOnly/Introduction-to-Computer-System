@@ -1,7 +1,8 @@
 /* 
  * tsh - A tiny shell program with job control
  * 
- * <Put your name and login ID here>
+ * Name: Yuanyuan Ma
+ * AndrewId: yuanyuam
  */
 #include <assert.h>
 #include <stdio.h>
@@ -104,6 +105,9 @@ void sio_error(char s[]);
 typedef void handler_t(int);
 handler_t *Signal(int signum, handler_t *handler);
 
+/* Here are helper routines that I have added */
+void ioredirect(char *infile, char *outfile);
+
 
 /*
  * main - The shell's main routine 
@@ -197,6 +201,8 @@ eval(char *cmdline)
 {
     int bg;              /* should the job run in bg or fg? */
     struct cmdline_tokens tok;
+    pid_t pid;
+    sigset_t set;
 
     /* Parse command line */
     bg = parseline(cmdline, &tok); 
@@ -206,7 +212,223 @@ eval(char *cmdline)
     if (tok.argv[0] == NULL) /* ignore empty lines */
         return;
 
+    /*
+     * If the user has requested a built-in command, execute it immedidately.
+     */
+    if (tok.builtins == BUILTIN_QUIT || tok.builtins == BUILTIN_JOBS || tok.builtins == BUILTIN_BG || tok.builtins == BUILTIN_FG) {
+        builtin_command(&tok);
+        return;
+    }
+
+    /* Initialize set*/
+    if (sigemptyset(&set) == 0) {
+        if (sigaddset(&set, SIGCHLD) != 0 || sigaddset(&set, SIGINT) != 0 || sigaddset(&set, SIGTSTP) != 0) {
+            unix_error("There is an erro when add a signal to signal set");
+        }
+    } else {
+        unix_error("There is an error when call sigemptyset()");
+    }
+
+    /*Block the the following signal: SIGCHLD, SIGINT, SIGTSTP before fork child*/
+    if (sigprocmask(SIG_BLOCK. &set, NULL) != 0) {
+        unix_error("There is an error when block the signals");
+    }
+
+    /*fork child*/
+    if ((pid = fork()) == 0) {
+        /*Unblick signal to let child receive those signals*/
+        if (sigprocmask(SIG_UNBLOCK, &set, NULL) != 0) {
+            unix_error("There is an error when unblock the signals");
+        }
+
+        /*set the child process in a new group*/
+        if (setpgid(0,0) != 0) {
+            unix_error("There is an error when call setpgid()");
+        }
+
+        /*IO redirection*/
+        ioredirect(tok.infile, tok.outfile);
+        
+        /* Execute the command */
+        if (execve(tok.argv[0], tok.argv, environ) < 0) {
+            printf("%s: command not found\n", tok.argv[0]);
+            exit(0);
+        } 
+
+    } else { // parent process
+        /* add the new job to job list*/ 
+        if (bg) {
+            if (addjob(job_list, pid, BG, cmdline) == 0) {
+                unix_error("There is an error when add a job to job list");
+            }
+            Sigprocmask(SIG_UNBLOCK, &set, null);
+            printf("Job[%d] (%d) %s\n", pid2jod(pid), pid, cmdline);
+        
+        } else {
+            if (addjob(job_list, pid, FG, cmdline) == 0 ) {
+                unix_error("There is an error when add a job to job list");
+            }
+
+            Sigprocmask(SIG_UNBLOCK, &set, null);
+            wait_fg(pid);
+        }
+    }
+
     return;
+}
+
+/*
+ *
+ */
+void
+builtin_command(struct cmdline_tokens *tok) {
+    switch (tok->builtins) {
+        case (BUILTIN_NONE):
+            printf("BUILTIN_NONE should not be passed in builtin_command()\n");
+            exit(0);
+        case (BUILTIN_QUIT):
+            exit(0);
+        case (BUILTIN_JOBS):
+            builtin_job(tok);
+            break;
+        case (BUILTIN_BG):
+
+    }
+}
+
+/*
+ *
+ */
+void
+builtin_job(struct cmdline_tokens *tok) {
+    int out_descriptor;
+    /* redirect output file*/
+    if (tok->outfile != NULL) {
+        if ((out_descriptor = open(tok->outfile, O_WRONLY)) != -1) {
+            listjobs(job_list, out_descriptor);
+            close(out_descriptor);
+        } else {
+            unix_error("There is an error when open output file");
+        }
+    } else {
+        /* If there is no output file, using stdout*/
+        listjobs(job_list, STDOUT_FILEND);
+    }
+
+}
+
+/*
+ *
+ */
+void
+builtin_bg(struct cmdline_tokens *tok, int state) {
+    pid_t pid;
+    int jid;
+    struct job_t* job_p
+
+    if (tok->argc < 2) return;
+
+    /* JID */
+    if (tok->argv[1][0] == '%') {
+        jid = atoi((char*) (tok->argv[1] + sizeof(char)));
+        pid = jid2pid(jid);
+        job_p = getjobjid(job_list, jid);
+
+        if (pid == 0) {
+            printf("No such job ID\n");
+            return;
+        }
+
+    } else { /* PID */
+        pid = atoi(tok->argv[tok->argc-1]);
+        job_p = getjobjid(job_list, pid);
+
+        if (job_p == NULL) {
+            printf("No such process\n");
+            return;
+        }
+    }
+
+    if (job_p -> state == ST) {
+        /* update the state of the current process */
+        job_p->state = state;
+        kill(job_p->pid, SIGCONT);
+            
+        if (state == BG) {
+            printf("[%d] (%d) %s\n", job_p->jid, job_p->pid, job_p->cmdline);
+        } else {
+            wait_fg(pid);
+        } 
+
+
+    }
+
+}
+
+/*
+ * ioredirect - Redirect the descriptor of the files passed in to 
+ * the descriptor of the current process
+ *
+ * Parameters:
+ *    infile: the input file.
+ *
+ *    outfile: the output file
+ *
+ * Note: If the input file is not NULL, the stdin is redirected to new descriptor
+ *       If the output file is not NULL. the stdout is redirected to new descriptor
+ */
+void 
+ioredirect(char *infile, char *outfile) {
+    int indescriptor; /*new file descriptor for input file*/
+    int outdescriptor; /*new file descriptor for output file*/
+
+    /*If the input file is not NULL, redict stdin to new descriptor*/
+    if (infile != NULL) {
+        if ((indescriptor = open(infile, O_RDONLY)) != -1) {
+            if (dup2(indescriptor, STDIN_FILENO) == -1) {
+                close(infile);
+            } else {
+                unix_error("There is an error when redict the input file");
+            }
+        } else {
+            unix_error("There is an error when open the input file");
+        }
+    }
+
+
+    /*If the output file is not NULL, redict stdout to new descriptor*/
+    if (outfile != NULL) {
+        if ((outdescriptor = open(outfile, O_WRONLY)) != -1) {
+            if (dup2(outdescriptor, STDOUT_FILENO) != -1) {
+                close(outfile);
+            } else {
+                unix_error("There is an error when redict the output file");
+            }
+        } else {
+            unix_error("There is an error when open output file");
+        }
+    }
+
+    return;
+}
+
+/*
+ * wait_fg - Wait for the foregound job to finish
+ *
+ * Parameter:
+ *    pid: the pid of a job
+ */
+void 
+wait_fg(pid_t pid) {
+    sigset_t tempset;
+    if (sigemptyset(&tempset) == 0) {
+        while (pid == fgpid(job_list)) {
+            /* wait for the foreground jobs*/
+            sigsuspend(&tempset);
+        }
+    } else {
+        unix_error("There is an error when call sigemptyset()");
+    }
 }
 
 /* 
@@ -372,6 +594,34 @@ parseline(const char *cmdline, struct cmdline_tokens *tok)
 void 
 sigchld_handler(int sig) 
 {
+    pid_t wpid;
+    int child_status;
+
+    /* get the pid of child process*/
+    while ((wpid = waitpid(-1, &child_status, WNOHANG|WUNTRACED)) > 0) {
+        
+        /* Evaluates to a non-zero value 
+         * if status was returned for a child process that exited normally.*/
+        if (WIFEXITED(child_status)) {
+            deletejob(job_lsit, wpid);
+        
+        } else if (WIFSIGNALED(child_status)) {
+            /* Evaluates to a non-zero value if status was returned for a child process 
+             * that terminated due to receipt of a signal that was not caught.*/
+            printf("Job [%d] (%d) is terminated because it received a %d signal \n", 
+                    pid2jid(wpid), wpid, WTERMSIG(child_status));
+            deletejob(job_list, wpid);
+        
+        } else if (WIFSTOPPED(child_status)) {
+            /* Evaluates to a non-zero value 
+             * if status was returned for a child process that is currently stopped.*/
+            printf("JOB [%d] (%d) stops because it received a % d signal \n", 
+                    pid2jid(wpid), wpid, WSTOPSIG(child_status));
+            // update the status of child process
+            getjobpid(job_list, pid)->state = ST;
+        }
+    
+    }
     return;
 }
 
@@ -383,6 +633,16 @@ sigchld_handler(int sig)
 void 
 sigint_handler(int sig) 
 {
+    /* get the pid of the foregound process */
+    pid_t pid = fgpid(job_list);
+
+    if (pid != 0) {
+        if (kill(-pid, SIGINT) != 0) {
+            unit_error("There is an error when kill a job");
+        }
+    } else {
+        printf("There is no such job")
+    }
     return;
 }
 
@@ -394,6 +654,17 @@ sigint_handler(int sig)
 void 
 sigtstp_handler(int sig) 
 {
+    /* get the pid of the foregound process*/
+    gid_t pid = fgpid(job_list);
+
+    if (pid != 0) {
+        if (kill(-pid, SIGTSTP) != 0) {
+            unix_error("There is an error when kill a job");
+        }
+    } else {
+        printf("There is no such job")
+    }
+
     return;
 }
 
