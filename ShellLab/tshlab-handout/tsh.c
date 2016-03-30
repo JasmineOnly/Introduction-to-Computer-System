@@ -107,6 +107,10 @@ handler_t *Signal(int signum, handler_t *handler);
 
 /* Here are helper routines that I have added */
 void ioredirect(char *infile, char *outfile);
+void builtin_command(struct cmdline_tokens *tok);
+void builtin_job(struct cmdline_tokens *tok);
+void builtin_bfg(struct cmdline_tokens *tok, int state);
+void wait_fg(pid_t pid);
 
 
 /*
@@ -230,7 +234,7 @@ eval(char *cmdline)
     }
 
     /*Block the the following signal: SIGCHLD, SIGINT, SIGTSTP before fork child*/
-    if (sigprocmask(SIG_BLOCK. &set, NULL) != 0) {
+    if (sigprocmask(SIG_BLOCK, &set, NULL) != 0) {
         unix_error("There is an error when block the signals");
     }
 
@@ -261,15 +265,15 @@ eval(char *cmdline)
             if (addjob(job_list, pid, BG, cmdline) == 0) {
                 unix_error("There is an error when add a job to job list");
             }
-            Sigprocmask(SIG_UNBLOCK, &set, null);
-            printf("Job[%d] (%d) %s\n", pid2jod(pid), pid, cmdline);
+            sigprocmask(SIG_UNBLOCK, &set, NULL);
+            printf("[%d] (%d) %s\n", pid2jid(pid), pid, cmdline);
         
         } else {
             if (addjob(job_list, pid, FG, cmdline) == 0 ) {
                 unix_error("There is an error when add a job to job list");
             }
 
-            Sigprocmask(SIG_UNBLOCK, &set, null);
+            sigprocmask(SIG_UNBLOCK, &set, NULL);
             wait_fg(pid);
         }
     }
@@ -278,7 +282,7 @@ eval(char *cmdline)
 }
 
 /*
- *
+ * builtin_command - Execute the built-in command(quit, jobm bg or fg)
  */
 void
 builtin_command(struct cmdline_tokens *tok) {
@@ -286,23 +290,34 @@ builtin_command(struct cmdline_tokens *tok) {
         case (BUILTIN_NONE):
             printf("BUILTIN_NONE should not be passed in builtin_command()\n");
             exit(0);
+            break;
         case (BUILTIN_QUIT):
             exit(0);
         case (BUILTIN_JOBS):
             builtin_job(tok);
             break;
         case (BUILTIN_BG):
+            builtin_bfg(tok, BG);
+            break;
+        case (BUILTIN_FG):
+            builtin_bfg(tok, FG);
+            break;
+        default:
+            printf("Something wrong when call builtin_command\n");
+            exit(0);
 
     }
+
+    return;
 }
 
 /*
- *
+ * builtin_job - Execute the built-in command: BUILTIN_JOBS
  */
 void
 builtin_job(struct cmdline_tokens *tok) {
     int out_descriptor;
-    /* redirect output file*/
+    /* If there exists the output file, redirect output file*/
     if (tok->outfile != NULL) {
         if ((out_descriptor = open(tok->outfile, O_WRONLY)) != -1) {
             listjobs(job_list, out_descriptor);
@@ -312,56 +327,53 @@ builtin_job(struct cmdline_tokens *tok) {
         }
     } else {
         /* If there is no output file, using stdout*/
-        listjobs(job_list, STDOUT_FILEND);
+        listjobs(job_list, STDOUT_FILENO);
     }
 
 }
 
 /*
- *
+ * builtin_bfg - Execute the built-in command: BUILTIN_BG and BUILTIN_FG
  */
 void
-builtin_bg(struct cmdline_tokens *tok, int state) {
-    pid_t pid;
+builtin_bfg(struct cmdline_tokens *tok, int state) {
+    struct job_t* joblist;
     int jid;
-    struct job_t* job_p
+    int pid;
 
     if (tok->argc < 2) return;
 
-    /* JID */
+    /* The job is identified by JID */
     if (tok->argv[1][0] == '%') {
         jid = atoi((char*) (tok->argv[1] + sizeof(char)));
-        pid = jid2pid(jid);
-        job_p = getjobjid(job_list, jid);
+        joblist = getjobjid(job_list, jid);
 
-        if (pid == 0) {
+        if (joblist == NULL) {
             printf("No such job ID\n");
             return;
         }
 
     } else { /* PID */
-        pid = atoi(tok->argv[tok->argc-1]);
-        job_p = getjobjid(job_list, pid);
+        pid = atoi(tok->argv[1]);
+        joblist = getjobjid(job_list, pid);
 
-        if (job_p == NULL) {
+        if (joblist == NULL) {
             printf("No such process\n");
             return;
         }
     }
 
-    if (job_p -> state == ST) {
+    //if (joblist->state == ST) {
         /* update the state of the current process */
-        job_p->state = state;
-        kill(job_p->pid, SIGCONT);
+        joblist->state = state;
+        kill(joblist->pid, SIGCONT);
             
         if (state == BG) {
-            printf("[%d] (%d) %s\n", job_p->jid, job_p->pid, job_p->cmdline);
-        } else {
+            printf("[%d] (%d) %s\n", joblist->jid, joblist->pid, joblist->cmdline);
+        } else if (state == FG){
             wait_fg(pid);
         } 
-
-
-    }
+    //}
 
 }
 
@@ -384,9 +396,9 @@ ioredirect(char *infile, char *outfile) {
 
     /*If the input file is not NULL, redict stdin to new descriptor*/
     if (infile != NULL) {
-        if ((indescriptor = open(infile, O_RDONLY)) != -1) {
-            if (dup2(indescriptor, STDIN_FILENO) == -1) {
-                close(infile);
+        if ((indescriptor = open(infile, O_RDONLY, 0)) != -1) {
+            if (dup2(indescriptor, STDIN_FILENO) != -1) {
+                close(indescriptor);
             } else {
                 unix_error("There is an error when redict the input file");
             }
@@ -398,9 +410,9 @@ ioredirect(char *infile, char *outfile) {
 
     /*If the output file is not NULL, redict stdout to new descriptor*/
     if (outfile != NULL) {
-        if ((outdescriptor = open(outfile, O_WRONLY)) != -1) {
+        if ((outdescriptor = open(outfile, O_WRONLY, 0)) != -1) {
             if (dup2(outdescriptor, STDOUT_FILENO) != -1) {
-                close(outfile);
+                close(outdescriptor);
             } else {
                 unix_error("There is an error when redict the output file");
             }
@@ -603,22 +615,22 @@ sigchld_handler(int sig)
         /* Evaluates to a non-zero value 
          * if status was returned for a child process that exited normally.*/
         if (WIFEXITED(child_status)) {
-            deletejob(job_lsit, wpid);
+            deletejob(job_list, wpid);
         
         } else if (WIFSIGNALED(child_status)) {
             /* Evaluates to a non-zero value if status was returned for a child process 
              * that terminated due to receipt of a signal that was not caught.*/
-            printf("Job [%d] (%d) is terminated because it received a %d signal \n", 
+            printf("Job [%d] (%d) terminated by signal %d\n",
                     pid2jid(wpid), wpid, WTERMSIG(child_status));
             deletejob(job_list, wpid);
         
         } else if (WIFSTOPPED(child_status)) {
             /* Evaluates to a non-zero value 
              * if status was returned for a child process that is currently stopped.*/
-            printf("JOB [%d] (%d) stops because it received a % d signal \n", 
+            printf("Job [%d] (%d) stopped by signal %d\n",
                     pid2jid(wpid), wpid, WSTOPSIG(child_status));
             // update the status of child process
-            getjobpid(job_list, pid)->state = ST;
+            getjobpid(job_list, wpid)->state = ST;
         }
     
     }
@@ -638,10 +650,10 @@ sigint_handler(int sig)
 
     if (pid != 0) {
         if (kill(-pid, SIGINT) != 0) {
-            unit_error("There is an error when kill a job");
+            unix_error("There is an error when kill a job");
         }
     } else {
-        printf("There is no such job")
+        printf("There is no such job");
     }
     return;
 }
@@ -662,7 +674,7 @@ sigtstp_handler(int sig)
             unix_error("There is an error when kill a job");
         }
     } else {
-        printf("There is no such job")
+        printf("There is no such job");
     }
 
     return;
